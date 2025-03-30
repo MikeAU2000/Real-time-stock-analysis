@@ -1,20 +1,20 @@
-# 实时股票分析系统
+# Real-time Stock Analysis System
 
-这是一个基于前后端分离架构的实时股票分析系统，提供股票数据的实时展示和分析功能。
+A real-time stock analysis system based on a front-end and back-end separated architecture, providing real-time stock data visualization and analysis capabilities.
 
-## 技术栈
+## Tech Stack
 
-### 前端技术栈
+### Frontend Tech Stack
 - Vue 3
 - TypeScript
 - Vite
-- Chart.js (用于图表展示)
-- Pinia (状态管理)
+- Chart.js (for data visualization)
+- Pinia (state management)
 - Vue Router
-- Vitest (单元测试)
-- Playwright (E2E测试)
+- Vitest (unit testing)
+- Playwright (E2E testing)
 
-### 后端技术栈
+### Backend Tech Stack
 - Spring Boot 3.4.3
 - Java 17
 - PostgreSQL
@@ -24,101 +24,101 @@
 - Lombok
 - Jackson
 
-## 项目结构
+## Project Structure
 
 ```
 .
-├── stock_frontend_project_latest/    # 前端项目
-│   ├── src/                         # 源代码
-│   ├── public/                      # 静态资源
-│   ├── dist/                        # 构建输出
-│   └── e2e/                         # E2E测试
-└── demo-bc-xfin-service-latest/     # 后端项目
-    └── src/                         # 源代码
+├── stock_frontend_project_latest/    # Frontend project
+│   ├── src/                         # Source code
+│   ├── public/                      # Static assets
+│   ├── dist/                        # Build output
+│   └── e2e/                         # E2E tests
+└── demo-bc-xfin-service-latest/     # Backend project
+    └── src/                         # Source code
 ```
 
-## 开发环境要求
+## Development Environment Requirements
 
-- Node.js (推荐最新LTS版本)
+- Node.js (Latest LTS version recommended)
 - Java 17
 - Maven
 - PostgreSQL
 - Redis
 
-## 运行说明
+## Running Instructions
 
-### 前端项目
+### Frontend Project
 
-1. 进入前端项目目录：
+1. Navigate to the frontend project directory:
 ```bash
 cd stock_frontend_project_latest
 ```
 
-2. 安装依赖：
+2. Install dependencies:
 ```bash
 npm install
 ```
 
-3. 启动开发服务器：
+3. Start development server:
 ```bash
 npm run dev
 ```
 
-4. 构建生产版本：
+4. Build for production:
 ```bash
 npm run build
 ```
 
-### 后端项目
+### Backend Project
 
-1. 进入后端项目目录：
+1. Navigate to the backend project directory:
 ```bash
 cd demo-bc-xfin-service-latest
 ```
 
-2. 使用Maven构建项目：
+2. Build the project with Maven:
 ```bash
 mvn clean install
 ```
 
-3. 运行应用：
+3. Run the application:
 ```bash
 mvn spring-boot:run
 ```
 
-## 测试
+## Testing
 
-### 前端测试
-- 运行单元测试：
+### Frontend Testing
+- Run unit tests:
 ```bash
 npm run test:unit
 ```
-- 运行E2E测试：
+- Run E2E tests:
 ```bash
 npm run test:e2e
 ```
 
-### 后端测试
+### Backend Testing
 ```bash
 mvn test
 ```
 
-## 功能特性
+## Features
 
-- 实时股票数据展示
-- 股票图表分析
-- 数据缓存
-- 响应式设计
-- 完整的测试覆盖
+- Real-time stock data visualization
+- Stock chart analysis
+- Data caching
+- Responsive design
+- Comprehensive test coverage
 
-## 贡献指南
+## Contributing
 
-1. Fork 项目
-2. 创建特性分支
-3. 提交更改
-4. 推送到分支
-5. 创建 Pull Request
+1. Fork the project
+2. Create a feature branch
+3. Commit your changes
+4. Push to the branch
+5. Create a Pull Request
 
-## 许可证
+## License
 
 MIT License
