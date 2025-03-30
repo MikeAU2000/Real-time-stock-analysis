@@ -1,0 +1,2537 @@
+<script setup lang="ts">
+import { ref, onMounted, onUnmounted, reactive, watchEffect } from 'vue'
+import { Chart, registerables } from 'chart.js'
+import type { ChartConfiguration, ChartData, ChartOptions } from 'chart.js'
+import type { Point, BubbleDataPoint } from 'chart.js'
+import 'chartjs-adapter-date-fns'
+import 'chartjs-chart-financial'
+
+// 定義Chart類型，解決Chart未找到問題
+type ChartType = any;
+
+declare global {
+  interface Window {
+    Chart: {
+      new (ctx: CanvasRenderingContext2D, config: Record<string, unknown>): ChartType
+      register(...components: unknown[]): void
+    }
+    CandlestickController: unknown
+    CandlestickElement: unknown
+  }
+}
+
+// 存储K线数据，供tooltip使用
+let globalCandleData: Array<Record<string, unknown>> = []
+// 添加全局变量存储线图数据
+let globalLineData: Array<Record<string, unknown>> = []
+
+// 預設的股票列表及信息
+const stockList = [
+  { code: '0388.HK', name: 'Hong Kong Exchanges' },
+  { code: '0700.HK', name: 'Tencent Holdings' },
+  { code: '0005.HK', name: 'HSBC Holdings' },
+  { code: '0001.HK', name: 'CK Hutchison' },
+  { code: '9988.HK', name: 'Alibaba Group' },
+  { code: '3690.HK', name: 'Meituan' },
+  { code: '1211.HK', name: 'BYD' },
+  { code: '1299.HK', name: 'AIA Group' },
+  { code: '0012.HK', name: 'Henderson Land' },
+  { code: '0016.HK', name: 'Sun Hung Kai Properties' },
+]
+
+const stockSymbol = ref('0388.HK') // 預設股票代號
+const chartInstance = ref<ChartType | null>(null)
+const updateInterval = ref<number | null>(null)
+const searchInput = ref('0388.HK') // 搜索輸入框的值
+const animationEnabled = ref(false) // 動畫效果開關狀態改為默認關閉
+const currentChartType = ref('line') // 當前圖表類型，預設為線圖
+// 添加K线图周期设置
+const candlePeriod = ref(1) // 默认为1
+const candlePeriodType = ref('month') // 默认为month
+// 添加K线图数据粒度设置
+const validRange = ref('1d') // 默认为1d (一天)
+// 添加股价图表时间范围设置
+const priceChartRange = ref('5min') // 默认为5分钟数据
+
+// 自定义tooltip状态
+const tooltip = reactive({
+  show: false,
+  data: null as Record<string, unknown> | null,
+  x: 0,
+  y: 0,
+})
+
+// 添加下拉菜单状态变量
+const showChartTypeDropdown = ref(false)
+const showPeriodDropdown = ref(false)
+const showRangeDropdown = ref(false)
+// 添加K线显示控制变量
+const showCandlestick = ref(true)
+const show5MA = ref(true)
+const show10MA = ref(true)
+const show20MA = ref(true)
+// 添加价格线显示控制变量
+const showPriceLine = ref(true)
+
+// 注册所有Chart.js组件
+Chart.register(...registerables)
+
+// 图表实例类型定义 - 使用any类型绕过严格类型检查
+type ChartInstance = any;
+
+// 定义K线数据类型
+interface KLinePoint {
+  o: number
+  h: number
+  l: number
+  c: number
+}
+
+/** 切換股票 */
+function switchStock(code: string) {
+  if (stockList.some((stock) => stock.code === code)) {
+    stockSymbol.value = code
+    searchInput.value = code
+    document.title = code
+    fetchDataAndRenderChart(currentChartType.value)
+  }
+}
+
+/** 搜索股票 */
+function searchStock() {
+  const stockCode = searchInput.value.trim().toUpperCase()
+  if (stockCode && stockList.some((stock) => stock.code === stockCode)) {
+    stockSymbol.value = stockCode
+    document.title = stockCode
+    fetchDataAndRenderChart(currentChartType.value)
+  } else {
+    alert('Please enter a valid stock code, e.g., 0388.HK, 0700.HK, 0005.HK')
+  }
+}
+
+/** 處理鍵盤輸入 */
+function handleKeyPress(event: KeyboardEvent) {
+  if (event.key === 'Enter') {
+    searchStock()
+  }
+}
+
+/** 更改圖表類型 */
+function changeChartType(event: Event) {
+  const target = event.target as HTMLSelectElement
+  currentChartType.value = target.value
+
+  // 清除之前的渲染定时器，避免多次渲染
+  if (updateInterval.value) {
+    clearInterval(updateInterval.value)
+    updateInterval.value = null
+  }
+
+  fetchDataAndRenderChart(currentChartType.value)
+
+  // 如果选择了K线图，确保周期下拉菜单使用正确的值
+  if (currentChartType.value === 'candlestick') {
+    const periodSelect = document.getElementById('periodSelect') as HTMLSelectElement
+    if (periodSelect) {
+      const periodValue = `${
+        validRange.value === '1d' ? '1month' : validRange.value === '1w' ? '1year' : '5years'
+      }`
+      periodSelect.value = periodValue
+    }
+  }
+
+  // 仅当非K线图时启动自动刷新
+  if (currentChartType.value !== 'candlestick') {
+    startAutoRefresh()
+  }
+}
+
+/** 更改K线时间周期 */
+function changeCandlePeriod(event: Event) {
+  const target = event.target as HTMLSelectElement
+  const value = target.value
+
+  // 根据选择的选项设置相应的参数
+  switch (value) {
+    case '1month':
+      // 1个月，日K线
+      validRange.value = '1d'
+      candlePeriod.value = 1
+      candlePeriodType.value = 'month'
+      break
+    case '1year':
+      // 1年，周K线
+      validRange.value = '1wk'
+      candlePeriod.value = 1
+      candlePeriodType.value = 'year'
+      break
+    case '5years':
+      // 5年，月K线
+      validRange.value = '1mo'
+      candlePeriod.value = 5
+      candlePeriodType.value = 'year'
+      break
+    default:
+      // 默认1个月，日K线
+      validRange.value = '1d'
+      candlePeriod.value = 1
+      candlePeriodType.value = 'month'
+  }
+
+  // 立即更新图表
+  if (currentChartType.value === 'candlestick') {
+    // 首先显示加载状态
+    const chartCanvas = document.getElementById('myChart') as HTMLCanvasElement
+    if (chartCanvas && chartCanvas.getContext) {
+      const ctx = chartCanvas.getContext('2d')
+      if (ctx) {
+        ctx.clearRect(0, 0, chartCanvas.width, chartCanvas.height)
+        ctx.font = '16px Arial'
+        ctx.fillStyle = 'white'
+        ctx.textAlign = 'center'
+        ctx.fillText('加載中...', chartCanvas.width / 2, chartCanvas.height / 2)
+      }
+    }
+
+    // 更新图表
+    fetchDataAndRenderChart('candlestick')
+  }
+}
+
+/** 更改图表时间范围 */
+function changePriceChartRange(event: Event) {
+  const target = event.target as HTMLSelectElement
+  priceChartRange.value = target.value
+
+  // 清除之前的渲染定时器，避免多次渲染
+  if (updateInterval.value) {
+    clearInterval(updateInterval.value)
+    updateInterval.value = null
+  }
+
+  // 重新获取数据并渲染图表
+  fetchDataAndRenderChart(currentChartType.value)
+
+  // 仅当不是使用K线数据的选项时重新启动自动刷新
+  const usesKLineData = priceChartRange.value === '1month' || priceChartRange.value === '1year'
+  if (currentChartType.value !== 'candlestick' && !usesKLineData) {
+    startAutoRefresh()
+  }
+}
+
+/** 切換動畫效果 */
+function toggleAnimation() {
+  animationEnabled.value = !animationEnabled.value
+}
+
+/** 啟動自動刷新 */
+function startAutoRefresh() {
+  if (updateInterval.value) {
+    clearInterval(updateInterval.value)
+  }
+
+  // 仅对非K线图启动自动刷新
+  if (currentChartType.value !== 'candlestick') {
+    updateInterval.value = setInterval(() => {
+      fetchDataAndRenderChart(currentChartType.value)
+    }, 10000)
+  }
+}
+
+/** 渲染圖表 */
+function renderChart(
+  data: Array<Record<string, unknown>>,
+  chartType: 'line' | 'candlestick' = 'line',
+) {
+  const chartCanvas = document.getElementById('myChart') as HTMLCanvasElement
+  if (!chartCanvas) {
+    console.error('Chart canvas not found')
+    return
+  }
+
+  // 清理之前的图表
+  if (chartInstance.value) {
+    chartInstance.value.destroy()
+    chartInstance.value = null
+  }
+
+  // 获取画布上下文
+  const ctx = chartCanvas.getContext('2d')
+  if (!ctx) {
+    console.error('Failed to get canvas context')
+    return
+  }
+
+  // 计算数据的最小和最大值
+  let minValue = Number.MAX_VALUE
+  let maxValue = Number.MIN_VALUE
+
+  data.forEach((item) => {
+    // 处理K线图数据
+    if (chartType === 'candlestick' && item.low !== undefined && item.high !== undefined) {
+      minValue = Math.min(minValue, Number(item.low))
+      maxValue = Math.max(maxValue, Number(item.high))
+    }
+    // 处理线图数据
+    else if (item.regularMarketPrice !== undefined) {
+      const price = Number(item.regularMarketPrice)
+      if (!isNaN(price)) {
+        minValue = Math.min(minValue, price)
+        maxValue = Math.max(maxValue, price)
+      }
+    }
+  })
+
+  // 预处理移动平均线数据
+  let ma5Data: number[] = []
+  let ma10Data: number[] = []
+  let ma20Data: number[] = []
+
+  if (chartType === 'candlestick') {
+    // 计算移动平均线
+    const closes = data.map((item) => Number(item.close))
+    ma5Data = calculateMA(5, closes)
+    ma10Data = calculateMA(10, closes)
+    ma20Data = calculateMA(20, closes)
+
+    // 更新MA线的最大最小值
+    ma5Data.forEach((value) => {
+      if (!isNaN(value)) {
+        minValue = Math.min(minValue, value)
+        maxValue = Math.max(maxValue, value)
+      }
+    })
+
+    ma10Data.forEach((value) => {
+      if (!isNaN(value)) {
+        minValue = Math.min(minValue, value)
+        maxValue = Math.max(maxValue, value)
+      }
+    })
+
+    ma20Data.forEach((value) => {
+      if (!isNaN(value)) {
+        minValue = Math.min(minValue, value)
+        maxValue = Math.max(maxValue, value)
+      }
+    })
+  }
+
+  // 添加上下边距
+  const valueRange = maxValue - minValue
+  const margin = valueRange * 0.05 // 5%的边距
+  minValue = Math.max(0, minValue - margin) // 确保最小值不小于0
+  maxValue = maxValue + margin
+
+  // 处理时间标签和数据集
+  const labels: string[] = []
+  const datasets: any[] = []
+
+  // K线图数据
+  const kLineData: KLinePoint[] = []
+
+  // 根据图表类型处理数据
+  if (chartType === 'candlestick') {
+    // K线图数据处理
+    data.forEach((item) => {
+      // 添加时间标签
+      if (item.marketUnixtime !== undefined) {
+        try {
+          const date = new Date(Number(item.marketUnixtime) * 1000)
+          // 根据不同时间范围使用不同的日期格式
+          if (priceChartRange.value === '1year' || priceChartRange.value === '5years') {
+            // 年月格式，适合长时间范围
+            labels.push(formatDateCustom(date, 'yyyy-MM'))
+          } else {
+            // 月日格式，适合短时间范围
+            labels.push(formatDateCustom(date, 'MM-dd'))
+          }
+        } catch (e) {
+          console.error('Invalid date:', item.marketUnixtime, e)
+          labels.push('Invalid')
+        }
+      } else if (item.tradeDate !== undefined && typeof item.tradeDate === 'string') {
+        labels.push(item.tradeDate.substring(5)) // 只显示月-日
+      } else {
+        labels.push('N/A')
+      }
+
+      // 添加K线数据
+      if (
+        item.open !== undefined &&
+        item.high !== undefined &&
+        item.low !== undefined &&
+        item.close !== undefined
+      ) {
+        kLineData.push({
+          o: Number(item.open),
+          h: Number(item.high),
+          l: Number(item.low),
+          c: Number(item.close),
+        })
+      }
+    })
+
+    // 只在显示K线图时添加烛图数据集
+    if (showCandlestick.value) {
+      datasets.push({
+        label: 'K线',
+        type: 'bar',
+        data: kLineData.map((d) => d.c), // 简化为只使用收盘价
+        backgroundColor: 'rgba(255, 0, 0, 0.5)',
+        borderColor: 'rgba(255, 0, 0, 1)',
+        borderWidth: 1,
+      })
+    }
+
+    // 添加移动平均线 - 同时渲染以避免闪烁
+    if (show5MA.value) {
+      datasets.push({
+        label: '5MA',
+        data: ma5Data,
+        borderColor: 'rgba(0, 183, 255, 1)',
+        backgroundColor: 'rgba(0, 183, 255, 0.2)',
+        borderWidth: 2,
+        type: 'line',
+        pointRadius: 0, // 移除点
+        fill: false,
+      })
+    }
+
+    if (show10MA.value) {
+      datasets.push({
+        label: '10MA',
+        data: ma10Data,
+        borderColor: 'rgba(255, 147, 0, 1)',
+        backgroundColor: 'rgba(255, 147, 0, 0.2)',
+        borderWidth: 2,
+        type: 'line',
+        pointRadius: 0, // 移除点
+        fill: false,
+      })
+    }
+
+    if (show20MA.value) {
+      datasets.push({
+        label: '20MA',
+        data: ma20Data,
+        borderColor: 'rgba(192, 0, 255, 1)',
+        backgroundColor: 'rgba(192, 0, 255, 0.2)',
+        borderWidth: 2,
+        type: 'line',
+        pointRadius: 0, // 移除点
+        fill: false,
+      })
+    }
+
+    // 在添加数据集后绘制K线
+    setTimeout(() => {
+      if (chartInstance.value && showCandlestick.value) {
+        const ctx = chartCanvas.getContext('2d')
+        if (ctx) {
+          // 绘制K线
+          const scales = chartInstance.value.scales
+          if (scales && scales.x && scales.y) {
+            drawKLines(ctx, kLineData, scales.x, scales.y)
+          }
+        }
+      }
+    }, 50)
+  } else {
+    // 线图数据处理
+    const priceData: number[] = []
+
+    data.forEach((item) => {
+      // 添加时间标签
+      if (item.marketUnixtime !== undefined) {
+        try {
+          const date = new Date(Number(item.marketUnixtime) * 1000)
+          if (priceChartRange.value === '5min') {
+            // 5分钟数据使用时分格式
+            labels.push(formatDateCustom(date, 'HH:mm'))
+          } else {
+            // 其他时间范围使用月日格式
+            labels.push(formatDateCustom(date, 'MM-dd'))
+          }
+        } catch (e) {
+          console.error('Invalid date:', item.marketUnixtime, e)
+          labels.push('Invalid')
+        }
+      } else {
+        labels.push('N/A')
+      }
+
+      // 添加价格数据
+      if (item.regularMarketPrice !== undefined) {
+        priceData.push(Number(item.regularMarketPrice))
+      } else {
+        priceData.push(NaN)
+      }
+    })
+
+    // 添加价格线数据集
+    if (showPriceLine.value) {
+      datasets.push({
+        label: '价格',
+        data: priceData,
+        borderColor: 'rgba(75, 192, 192, 1)',
+        backgroundColor: 'rgba(75, 192, 192, 0.2)',
+        borderWidth: 2,
+        tension: 0.4,
+        fill: true,
+      })
+    }
+  }
+
+  // 创建图表配置
+  const chartConfig: ChartConfiguration = {
+    type: 'line', // 基础类型为线图
+    data: {
+      labels,
+      datasets,
+    } as ChartData,
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: {
+        duration: 0, // 禁用动画以提高性能
+      },
+      plugins: {
+        legend: {
+          position: 'top',
+          labels: {
+            color: 'white',
+            font: {
+              family: "'Helvetica Neue', 'Helvetica', 'Arial', sans-serif",
+              size: 12,
+            },
+          },
+        },
+        tooltip: {
+          enabled: true,
+          mode: 'index',
+          intersect: false,
+          callbacks: {
+            label: function (context: any) {
+              const datasetIndex = context.datasetIndex
+              const dataIndex = context.dataIndex
+
+              // 处理K线图数据
+              if (datasets[datasetIndex].label === 'K线' && showCandlestick.value) {
+                const kLinePoint = kLineData[dataIndex]
+                if (kLinePoint) {
+                  return [
+                    `开盘: ${kLinePoint.o.toFixed(2)}`,
+                    `最高: ${kLinePoint.h.toFixed(2)}`,
+                    `最低: ${kLinePoint.l.toFixed(2)}`,
+                    `收盘: ${kLinePoint.c.toFixed(2)}`,
+                  ]
+                }
+                return 'K线数据不可用'
+              }
+              // 处理移动平均线数据
+              else if (
+                datasets[datasetIndex].label === '5MA' ||
+                datasets[datasetIndex].label === '10MA' ||
+                datasets[datasetIndex].label === '20MA'
+              ) {
+                const value = context.parsed.y
+                if (value !== undefined && !isNaN(value)) {
+                  return `${datasets[datasetIndex].label}: ${value.toFixed(2)}`
+                }
+                return `${datasets[datasetIndex].label}: N/A`
+              }
+              // 处理价格线数据
+              else {
+                const value = context.parsed.y
+                if (value !== undefined && !isNaN(value)) {
+                  return `价格: ${value.toFixed(2)}`
+                }
+                return '价格: N/A'
+              }
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          title: {
+            display: true,
+            text: '时间',
+            color: 'white',
+          },
+          ticks: {
+            color: 'white',
+            maxRotation: 45,
+            minRotation: 45,
+            font: {
+              family: "'Helvetica Neue', 'Helvetica', 'Arial', sans-serif",
+              size: 11,
+            },
+          },
+          grid: {
+            color: 'rgba(255, 255, 255, 0.1)',
+          },
+        },
+        y: {
+          title: {
+            display: true,
+            text: '价格',
+            color: 'white',
+          },
+          ticks: {
+            color: 'white',
+            font: {
+              family: "'Helvetica Neue', 'Helvetica', 'Arial', sans-serif",
+              size: 11,
+            },
+          },
+          grid: {
+            color: 'rgba(255, 255, 255, 0.1)',
+          },
+          // 设置Y轴范围，确保K线不超出边界
+          min: minValue,
+          max: maxValue,
+        },
+      },
+    } as ChartOptions,
+  }
+
+  // 创建图表
+  chartInstance.value = new Chart(ctx, chartConfig as any) as any;
+
+  // 标记为已渲染
+  chartRendered.value = true
+  lastRenderTime.value = Date.now()
+}
+
+// 绘制K线图
+function drawKLines(ctx: CanvasRenderingContext2D, data: KLinePoint[], xScale: any, yScale: any) {
+  // 计算K线宽度
+  const barWidth = Math.max(5, 60 / data.length)
+
+  data.forEach((kline, index) => {
+    const x = xScale.getPixelForValue(index)
+    const yOpen = yScale.getPixelForValue(kline.o)
+    const yHigh = yScale.getPixelForValue(kline.h)
+    const yLow = yScale.getPixelForValue(kline.l)
+    const yClose = yScale.getPixelForValue(kline.c)
+
+    // 是红K还是绿K
+    const isRising = kline.c > kline.o
+
+    // 设置颜色
+    ctx.strokeStyle = isRising ? 'rgb(235, 47, 6)' : 'rgb(0, 180, 42)'
+    ctx.fillStyle = isRising ? 'rgba(235, 47, 6, 0.5)' : 'rgba(0, 180, 42, 0.5)'
+
+    // 画高低线
+    ctx.beginPath()
+    ctx.moveTo(x, yHigh)
+    ctx.lineTo(x, yLow)
+    ctx.stroke()
+
+    // 画K线实体
+    const top = isRising ? yClose : yOpen
+    const bottom = isRising ? yOpen : yClose
+    const height = Math.abs(yClose - yOpen)
+
+    ctx.fillRect(x - barWidth / 2, top, barWidth, height)
+    ctx.strokeRect(x - barWidth / 2, top, barWidth, height)
+  })
+}
+
+/** 渲染K線圖 */
+function renderCandlestickChart(candleData: Array<Record<string, unknown>>) {
+  try {
+    // 確保有數據
+    if (!candleData || candleData.length === 0) {
+      console.error('沒有K線數據可顯示')
+      const chartCanvas = document.getElementById('myChart') as HTMLCanvasElement
+      if (chartCanvas && chartCanvas.getContext) {
+        const ctx = chartCanvas.getContext('2d')
+        if (ctx) {
+          ctx.clearRect(0, 0, chartCanvas.width, chartCanvas.height)
+          ctx.font = '16px Arial'
+          ctx.fillStyle = 'white'
+          ctx.textAlign = 'center'
+          ctx.fillText('無K線數據可顯示', chartCanvas.width / 2, chartCanvas.height / 2)
+        }
+      }
+      return
+    }
+
+    // 確保K線數據在正確的日期範圍內（非未來日期）
+    const today = new Date()
+    today.setHours(23, 59, 59, 999) // 設置為今天的最後一刻
+
+    // 過濾掉未來日期的數據
+    const filteredData = candleData.filter((item) => {
+      const dateStr = item.tradeDate as string
+      if (!dateStr) return false
+
+      // 嘗試解析日期
+      try {
+        const itemDate = new Date(dateStr)
+        // 如果是無效日期或未來日期，則過濾掉
+        return !isNaN(itemDate.getTime()) && itemDate <= today
+      } catch {
+        return false
+      }
+    })
+
+    // 如果過濾後沒有數據，使用原始數據但警告用戶
+    if (filteredData.length === 0) {
+      console.warn('過濾後沒有有效的K線數據，使用原始數據', candleData)
+    } else {
+      candleData = filteredData
+      console.log('過濾後的K線數據', candleData)
+    }
+
+    // 按 tradeDate 升序排序，確保時間軸正確
+    try {
+      // 首先过滤掉无效日期
+      const validCandleData = candleData.filter((item) => {
+        try {
+          const dateStr = item.tradeDate as string
+          if (!dateStr) return false
+
+          const date = new Date(dateStr)
+          return !isNaN(date.getTime())
+        } catch {
+          return false
+        }
+      })
+
+      if (validCandleData.length === 0) {
+        console.error('没有包含有效日期的K线数据')
+        // 处理无有效数据的情况
+        const chartCanvas = document.getElementById('myChart') as HTMLCanvasElement
+        if (chartCanvas && chartCanvas.getContext) {
+          const ctx = chartCanvas.getContext('2d')
+          if (ctx) {
+            ctx.clearRect(0, 0, chartCanvas.width, chartCanvas.height)
+            ctx.font = '16px Arial'
+            ctx.fillStyle = 'red'
+            ctx.textAlign = 'center'
+            ctx.fillText('K線數據日期格式無效', chartCanvas.width / 2, chartCanvas.height / 2)
+          }
+        }
+        return
+      }
+
+      // 使用有效的数据进行排序
+      candleData = validCandleData
+      candleData.sort((a, b) => {
+        const dateA = new Date(a.tradeDate as string)
+        const dateB = new Date(b.tradeDate as string)
+        return dateA.getTime() - dateB.getTime()
+      })
+    } catch (sortError) {
+      console.error('K线数据排序错误:', sortError)
+    }
+
+    // 输出日期范围和数据点数量的调试信息
+    if (candleData.length > 0) {
+      try {
+        const firstDate = new Date(candleData[0].tradeDate as string)
+        const lastDate = new Date(candleData[candleData.length - 1].tradeDate as string)
+
+        // 检查日期是否有效
+        if (!isNaN(firstDate.getTime()) && !isNaN(lastDate.getTime())) {
+          console.log(
+            `K线数据范围: ${firstDate.toISOString().split('T')[0]} 到 ${lastDate.toISOString().split('T')[0]}, 总计 ${candleData.length} 个数据点`,
+          )
+        } else {
+          console.warn('K线数据日期无效', {
+            firstDate: candleData[0].tradeDate,
+            lastDate: candleData[candleData.length - 1].tradeDate,
+          })
+        }
+      } catch (dateError) {
+        console.error('处理K线日期范围时出错:', dateError, {
+          firstDate: candleData[0].tradeDate,
+          lastDate: candleData[candleData.length - 1].tradeDate,
+        })
+      }
+
+      // 检查是否存在时间间隔异常的数据点
+      if (validRange.value === '1mo' || validRange.value === '1m') {
+        let previousDate = null
+        const timeGaps = []
+
+        for (let i = 0; i < candleData.length; i++) {
+          try {
+            const dateStr = candleData[i].tradeDate as string
+            if (!dateStr) continue
+
+            const currentDate = new Date(dateStr)
+            if (isNaN(currentDate.getTime())) {
+              console.warn(`无效的日期值在索引 ${i}:`, dateStr)
+              continue
+            }
+
+            if (previousDate) {
+              // 对于月K线，检查相邻数据点的月份差距
+              const monthDiff =
+                (currentDate.getFullYear() - previousDate.getFullYear()) * 12 +
+                (currentDate.getMonth() - previousDate.getMonth())
+
+              if (monthDiff > 1) {
+                // 记录大于1个月的时间间隔
+                try {
+                  timeGaps.push({
+                    index: i,
+                    previousDate: previousDate.toISOString().split('T')[0],
+                    currentDate: currentDate.toISOString().split('T')[0],
+                    gap: `${monthDiff} months`,
+                  })
+                } catch (isoError) {
+                  console.warn('无法格式化时间间隔的日期:', isoError)
+                }
+              }
+            }
+
+            previousDate = currentDate
+          } catch (loopError) {
+            console.error('处理K线时间间隔时出错:', loopError)
+          }
+        }
+
+        if (timeGaps.length > 0) {
+          console.warn('检测到月K线数据中存在时间间隔:', timeGaps)
+        }
+      }
+    }
+
+    // 獲取Canvas元素
+    const chartCanvas = document.getElementById('myChart') as HTMLCanvasElement
+    if (!chartCanvas) {
+      console.error('找不到 Canvas 元素')
+      return
+    }
+
+    const ctx = chartCanvas.getContext('2d')
+    if (!ctx) {
+      console.error('無法獲取 Canvas 上下文')
+      return
+    }
+
+    // 銷毀舊圖表實例（如果存在）
+    if (chartInstance.value) {
+      chartInstance.value.destroy()
+      chartInstance.value = null
+    }
+
+    // 計算Y軸的範圍
+    let minValue = Number.MAX_VALUE
+    let maxValue = Number.MIN_VALUE
+
+    candleData.forEach((item) => {
+      const high = Number(item.high)
+      const low = Number(item.low)
+      if (!isNaN(high) && high > maxValue) maxValue = high
+      if (!isNaN(low) && low < minValue) minValue = low
+    })
+
+    // 確保最大最小值有效
+    if (
+      !isFinite(minValue) ||
+      !isFinite(maxValue) ||
+      minValue === Number.MAX_VALUE ||
+      maxValue === Number.MIN_VALUE
+    ) {
+      console.error('K線數據範圍無效', { minValue, maxValue })
+      minValue = 90
+      maxValue = 110
+    }
+
+    const buffer = (maxValue - minValue) * 0.1
+    minValue = Math.max(0, minValue - buffer)
+    maxValue = maxValue + buffer
+
+    // 存储K线数据，以便在mouseMove事件中使用
+    globalCandleData = [...candleData]
+
+    // 获取K线周期文本
+    let periodText = ''
+    switch (validRange.value) {
+      case '1d':
+        periodText = '日K'
+        break
+      case '1wk':
+      case '1w':
+        periodText = '周K'
+        break
+      case '1mo':
+      case '1m':
+        periodText = '月K'
+        break
+      default:
+        periodText = '日K'
+    }
+
+    // 設置固定寬度的數據標籤，確保X軸均勻分佈
+    const labels = candleData.map((item, index) => {
+      // 將日期格式化
+      try {
+        const date = new Date(item.tradeDate as string)
+        if (!isNaN(date.getTime())) {
+          // 根据不同周期显示不同格式的日期
+          if (validRange.value === '1d') {
+            // 日K线显示月-日
+            const month = (date.getMonth() + 1).toString().padStart(2, '0')
+            const day = date.getDate().toString().padStart(2, '0')
+            return `${month}-${day}`
+          } else if (validRange.value === '1wk' || validRange.value === '1w') {
+            // 周K线显示月-日，并精简显示
+            const month = (date.getMonth() + 1).toString().padStart(2, '0')
+            const day = date.getDate().toString().padStart(2, '0')
+            // 更精简的格式，节省空间
+            return `${month}/${day}`
+          } else if (validRange.value === '1mo' || validRange.value === '1m') {
+            // 月K线显示年-月
+            const year = date.getFullYear()
+            const month = (date.getMonth() + 1).toString().padStart(2, '0')
+            // 输出调试信息，帮助识别标签生成情况
+            if (index % 5 === 0) {
+              console.log(
+                `生成月K线标签 index=${index}: ${year}/${month}, 原始日期=${item.tradeDate}`,
+              )
+            }
+            return `${year}/${month}`
+          } else {
+            // 其他情况
+            const year = date.getFullYear()
+            const month = (date.getMonth() + 1).toString().padStart(2, '0')
+            return `${year}-${month}`
+          }
+        }
+      } catch (error) {
+        console.warn('日期解析錯誤', error, item.tradeDate)
+      }
+      return `D${index}` // 使用序號作為備用
+    })
+
+    // 準備圖表數據
+    const chartData = {
+      labels: labels,
+      datasets: [
+        {
+          label: `${stockSymbol.value} ${periodText}`,
+          data: candleData.map((item, index) => ({
+            x: index, // 使用索引作为X坐标
+            o: Number(item.open),
+            h: Number(item.high),
+            l: Number(item.low),
+            c: Number(item.close),
+            v: Number(item.volume),
+          })),
+          pointRadius: 0, // 隱藏散點
+        },
+      ],
+    }
+
+    // 創建Chart.js實例
+    chartInstance.value = new window.Chart(ctx, {
+      type: 'scatter',
+      data: chartData,
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: {
+          duration: animationEnabled.value ? 800 : 0,
+        },
+        plugins: {
+          legend: {
+            display: true,
+            position: 'top',
+            labels: {
+              color: 'white',
+              boxWidth: 15,
+              padding: 10,
+              font: {
+                size: 14,
+                weight: 'bold',
+              },
+            },
+          },
+          tooltip: {
+            enabled: false, // 禁用Chart.js内置tooltip
+          },
+        },
+        scales: {
+          x: {
+            type: 'category',
+            display: true,
+            title: {
+              display: true,
+              text: 'Date',
+              color: 'white',
+            },
+            ticks: {
+              color: 'white',
+              font: {
+                size: 10,
+              },
+              maxRotation: validRange.value === '1wk' ? 45 : 0, // 周K线允许旋转标签以避免重叠
+              autoSkip: true, // 所有图表都允许自动跳过
+              autoSkipPadding: validRange.value === '1wk' ? 10 : 20, // 周K线减小间距
+              callback: function (value: unknown, index: number) {
+                // 智能调整时间标记密度
+                if (validRange.value === '1wk') {
+                  // 周K线的智能调整逻辑
+                  const totalPoints = labels.length
+                  let interval
+
+                  // 根据数据量动态调整显示间隔
+                  if (totalPoints <= 20) {
+                    interval = 1 // 数据量小，全部显示
+                  } else if (totalPoints <= 40) {
+                    interval = 2 // 每隔1个显示1个
+                  } else if (totalPoints <= 60) {
+                    interval = 3 // 每隔2个显示1个
+                  } else if (totalPoints <= 100) {
+                    interval = 4 // 每隔3个显示1个
+                  } else {
+                    interval = Math.ceil(totalPoints / 25) // 确保大约显示25个标签
+                  }
+
+                  // 如果是月的第一天或15号，优先显示
+                  const date = new Date(candleData[index]?.tradeDate as string)
+                  if (!isNaN(date.getTime())) {
+                    const day = date.getDate()
+                    if (day === 1 || day === 15) {
+                      return labels[index]
+                    }
+                  }
+
+                  // 应用间隔规则
+                  return index % interval === 0 ? labels[index] : ''
+                } else if (validRange.value === '1mo' || validRange.value === '1m') {
+                  // 月K线的显示逻辑
+                  const totalPoints = labels.length
+                  let interval
+
+                  // 根據數據量更均勻地分布標籤
+                  if (totalPoints <= 12) {
+                    interval = 1 // 數據量小，全部顯示
+                  } else if (totalPoints <= 36) {
+                    interval = 2 // 每2個月顯示一個，更均勻分布
+                  } else if (totalPoints <= 60) {
+                    interval = 3 // 每3個月顯示一個，提高均勻度
+                  } else {
+                    interval = 4 // 每4個月顯示一個，確保足夠密度
+                  }
+
+                  // 優先顯示年初和年中
+                  const date = new Date(candleData[index]?.tradeDate as string)
+                  if (!isNaN(date.getTime())) {
+                    const month = date.getMonth() + 1
+                    // 確保至少顯示每年的1月、7月
+                    if (month === 1 || month === 7) {
+                      return labels[index]
+                    }
+
+                    // 確保2020-2024年每年都有足夠標記
+                    const year = date.getFullYear()
+                    if (
+                      year >= 2020 &&
+                      year <= 2024 &&
+                      (month === 1 || month === 4 || month === 7 || month === 10)
+                    ) {
+                      return labels[index]
+                    }
+                  }
+
+                  // 均勻分布其他標記
+                  return index % interval === 0 ? labels[index] : ''
+                } else {
+                  // 其他图表类型使用原有逻辑
+                  const maxLabels = 10
+                  const step = Math.ceil(labels.length / maxLabels)
+                  return index % step === 0 ? labels[index] : ''
+                }
+              },
+            },
+            grid: {
+              color: 'rgba(255, 255, 255, 0.3)', // 將透明度從0.1增加到0.3，使格線更明亮
+              lineWidth: 0.5,
+              tickLength: 0,
+              drawTicks: false,
+              drawBorder: false,
+            },
+          },
+          y: {
+            display: true,
+            position: 'right',
+            title: {
+              display: true,
+              text: 'Price',
+              color: 'white',
+            },
+            min: minValue,
+            max: maxValue,
+            ticks: {
+              color: 'white',
+              font: {
+                size: 10,
+              },
+              count: 6,
+            },
+            grid: {
+              color: 'rgba(255, 255, 255, 0.3)', // 將透明度從0.1增加到0.3，使格線更明亮
+              lineWidth: 0.5,
+              tickLength: 0,
+              drawTicks: false,
+              drawBorder: false,
+            },
+          },
+        },
+      },
+    })
+
+    // 自定義繪製K線
+    if (chartInstance.value) {
+      const canvas = chartCanvas
+      // 添加鼠标移动监听
+      canvas.onmousemove = handleCanvasMouseMove
+
+      // 添加鼠标离开监听
+      canvas.onmouseout = () => {
+        tooltip.show = false
+      }
+
+      // 保存原始繪製函數
+      const originalDraw = chartInstance.value.draw
+
+      // 覆蓋繪製函數，添加K線繪製邏輯
+      chartInstance.value.draw = function (...args: any[]) {
+        try {
+          // 調用原始繪製函數
+          originalDraw.apply(this, args)
+
+          // 獲取坐標軸比例尺
+          const xScale = this.scales.x
+          const yScale = this.scales.y
+          if (!xScale || !yScale) return // 确保scales存在
+
+          // 獲取畫布上下文
+          const ctx = this.ctx
+
+          // 優化計算K線寬度的邏輯，根據數據點數量動態調整
+          const dataLength = candleData.length
+          let barWidth
+
+          // 根據數據點數量動態調整K線寬度
+          if (dataLength <= 20) {
+            // 數據量少時，使用較寬的K線
+            barWidth = Math.min(15, chartCanvas.width / dataLength / 2)
+          } else if (dataLength <= 50) {
+            // 中等數據量
+            barWidth = Math.min(10, chartCanvas.width / dataLength / 2.2)
+          } else if (dataLength <= 100) {
+            // 較大數據量
+            barWidth = Math.min(6, chartCanvas.width / dataLength / 2.5)
+          } else {
+            // 大量數據
+            barWidth = Math.min(4, chartCanvas.width / dataLength / 3)
+          }
+
+          // 確保最小寬度不會小於1像素
+          barWidth = Math.max(barWidth, 1)
+
+          // 繪製每個K線
+          candleData.forEach((item, index) => {
+            try {
+              // 使用索引位置而不是日期字符串本身
+              const x = xScale.getPixelForValue(index)
+
+              // 確保數據類型正確並且存在
+              const open = Number(item.o)
+              const high = Number(item.h)
+              const low = Number(item.l)
+              const close = Number(item.c)
+
+              // 檢查數據有效性
+              if (isNaN(open) || isNaN(high) || isNaN(low) || isNaN(close)) {
+                console.warn(`跳過無效的K線數據點: ${index}`, item)
+                return
+              }
+
+              // 計算價格對應的Y座標
+              const openY = yScale.getPixelForValue(open)
+              const highY = yScale.getPixelForValue(high)
+              const lowY = yScale.getPixelForValue(low)
+              const closeY = yScale.getPixelForValue(close)
+
+              // 計算K線實體的頂部和底部
+              const topY = Math.min(openY, closeY)
+              const bottomY = Math.max(openY, closeY)
+
+              // 繪製影線（高低價）
+              ctx.beginPath()
+              ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)'
+              ctx.lineWidth = 1
+              ctx.moveTo(x, highY)
+              ctx.lineTo(x, topY)
+              ctx.moveTo(x, bottomY)
+              ctx.lineTo(x, lowY)
+              ctx.stroke()
+
+              // 繪製K線實體（開盤與收盤價）
+              ctx.beginPath()
+              ctx.fillStyle =
+                open < close
+                  ? 'rgba(235, 47, 6, 0.8)' // 上漲（紅色）
+                  : 'rgba(0, 180, 42, 0.8)' // 下跌（綠色）
+              ctx.fillRect(x - barWidth / 2, topY, barWidth, bottomY - topY)
+              ctx.strokeStyle = open < close ? 'rgba(235, 47, 6, 1)' : 'rgba(0, 180, 42, 1)'
+              ctx.lineWidth = 1
+              ctx.strokeRect(x - barWidth / 2, topY, barWidth, bottomY - topY)
+            } catch (error) {
+              console.error('绘制K线错误:', error, item)
+            }
+          })
+        } catch (error) {
+          console.error('绘制K线主要错误:', error)
+        }
+      }
+
+      // 避免使用update方法触发递归调用，改为手动重绘一次
+      setTimeout(() => {
+        if (chartInstance.value && chartCanvas) {
+          try {
+            // 强制重绘但不调用update
+            const ctx = chartCanvas.getContext('2d')
+            if (ctx) {
+              // 清除画布
+              ctx.clearRect(0, 0, chartCanvas.width, chartCanvas.height)
+              // 调用原始绘制方法
+              chartInstance.value.draw()
+            }
+          } catch (error) {
+            console.error('手動重繪圖表失敗:', error)
+          }
+        }
+      }, 100)
+    }
+  } catch (error) {
+    console.error('渲染K线图错误:', error)
+    // 显示错误信息
+    const chartCanvas = document.getElementById('myChart') as HTMLCanvasElement
+    if (chartCanvas && chartCanvas.getContext) {
+      const ctx = chartCanvas.getContext('2d')
+      if (ctx) {
+        ctx.clearRect(0, 0, chartCanvas.width, chartCanvas.height)
+        ctx.font = '16px Arial'
+        ctx.fillStyle = 'red'
+        ctx.textAlign = 'center'
+        ctx.fillText('K線圖渲染失敗，請重試', chartCanvas.width / 2, chartCanvas.height / 2)
+      }
+    }
+  }
+}
+
+// 处理线图的鼠标移动事件
+function handleLineChartMouseMove(event: MouseEvent) {
+  if (!chartInstance.value || !globalLineData || globalLineData.length === 0) return
+
+  const rect = (event.target as HTMLCanvasElement).getBoundingClientRect()
+  const x = event.clientX - rect.left
+  const y = event.clientY - rect.top
+
+  const xScale = chartInstance.value.scales.x
+  const yScale = chartInstance.value.scales.y
+
+  if (!xScale || !yScale) return
+
+  let closestPoint = null
+  let minDistance = Number.MAX_VALUE
+  let datasetIndex = -1
+  let pointIndex = -1
+
+  // 检查所有数据集的所有点
+  const chart = chartInstance.value // 使用临时变量避免null检查警告
+  chart.data.datasets.forEach((dataset: any, i: number) => {
+    if (!dataset.data) return
+
+    const meta = chart.getDatasetMeta(i)
+    if (!meta || !meta.data) return // 确保meta和meta.data存在
+
+    meta.data.forEach((point: any, j: number) => {
+      const dist = Math.sqrt(Math.pow(point.x - x, 2) + Math.pow(point.y - y, 2))
+      if (dist < minDistance && dist < 20) {
+        // 20px 为检测半径
+        minDistance = dist
+        closestPoint = point
+        datasetIndex = i
+        pointIndex = j
+      }
+    })
+  })
+
+  if (
+    closestPoint &&
+    pointIndex !== -1 &&
+    datasetIndex !== -1 &&
+    pointIndex < globalLineData.length
+  ) {
+    tooltip.show = true
+    tooltip.x = event.clientX
+    tooltip.y = event.clientY
+
+    // 根据数据集索引确定是哪条线的数据点
+    const data = globalLineData[pointIndex]
+
+    // 检查数据是否为日K格式
+    const isDateFormat = data && data.tradeDate !== undefined
+    // 检查是否是5年数据
+    const is5YearData = priceChartRange.value === '5years'
+
+    if (isDateFormat) {
+      // 日K数据格式处理
+      if (datasetIndex === 0) {
+        // 价格点
+        tooltip.data = {
+          type: 'price',
+          time: formatDate(data.tradeDate, !is5YearData),
+          price: data.close,
+        }
+      } else if (datasetIndex === 1 && chart.data.datasets[1]?.data?.[pointIndex] !== null) {
+        // 5MA点
+        tooltip.data = {
+          type: 'sma',
+          time: formatDate(data.tradeDate, !is5YearData),
+          price: chart.data.datasets[1]?.data?.[pointIndex],
+          label: '5MA',
+        }
+      } else if (datasetIndex === 2 && chart.data.datasets[2]?.data?.[pointIndex] !== null) {
+        // 10MA点
+        tooltip.data = {
+          type: 'sma',
+          time: formatDate(data.tradeDate, !is5YearData),
+          price: chart.data.datasets[2]?.data?.[pointIndex],
+          label: '10MA',
+        }
+      } else if (datasetIndex === 3 && chart.data.datasets[3]?.data?.[pointIndex] !== null) {
+        // 20MA点
+        tooltip.data = {
+          type: 'sma',
+          time: formatDate(data.tradeDate, !is5YearData),
+          price: chart.data.datasets[3]?.data?.[pointIndex],
+          label: '20MA',
+        }
+      }
+    } else {
+      // 常规时间格式处理
+      const timeDisplay =
+        data && data.marketUnixTime
+          ? new Date(data.marketUnixTime as number).toLocaleTimeString()
+          : 'N/A'
+
+      if (datasetIndex === 0) {
+        // 价格点
+        tooltip.data = {
+          type: 'price',
+          time: timeDisplay,
+          price: data?.regularMarketPrice,
+        }
+      } else if (datasetIndex === 1) {
+        // 5MA点
+        tooltip.data = {
+          type: 'sma',
+          time: timeDisplay,
+          price: data?.smaFivePrice,
+          label: '5MA',
+        }
+      } else if (datasetIndex === 2) {
+        // 10MA点
+        tooltip.data = {
+          type: 'sma',
+          time: timeDisplay,
+          price: data?.smaTenPrice,
+          label: '10MA',
+        }
+      } else if (datasetIndex === 3) {
+        // 20MA点
+        tooltip.data = {
+          type: 'sma',
+          time: timeDisplay,
+          price: data?.smaTwentyPrice,
+          label: '20MA',
+        }
+      }
+    }
+  } else {
+    tooltip.show = false
+  }
+}
+
+// 处理Canvas鼠标移动
+function handleCanvasMouseMove(event: MouseEvent) {
+  if (!chartInstance.value) return
+
+  // 判断当前图表类型，调用相应的处理函数
+  if (currentChartType.value === 'line' || currentChartType.value === 'movingAverage') {
+    handleLineChartMouseMove(event)
+    return
+  }
+
+  // K线图tooltip处理逻辑
+  const rect = (event.target as HTMLCanvasElement).getBoundingClientRect()
+  const x = event.clientX - rect.left
+
+  const xScale = chartInstance.value.scales.x
+  const yScale = chartInstance.value.scales.y
+
+  if (!xScale || !yScale) return
+
+  // 使用與繪製相同的邏輯計算K線寬度
+  const dataLength = globalCandleData.length
+  let barWidth
+
+  if (dataLength <= 20) {
+    barWidth = Math.min(15, rect.width / dataLength / 2)
+  } else if (dataLength <= 50) {
+    barWidth = Math.min(10, rect.width / dataLength / 2.2)
+  } else if (dataLength <= 100) {
+    barWidth = Math.min(6, rect.width / dataLength / 2.5)
+  } else {
+    barWidth = Math.min(4, rect.width / dataLength / 3)
+  }
+
+  barWidth = Math.max(barWidth, 1)
+
+  const dataArray = chartInstance.value.data.datasets[0].data
+  let found = false
+  let closestIndex = -1
+  let minDistance = Number.MAX_VALUE
+
+  for (let i = 0; i < dataArray.length; i++) {
+    const dataPoint = dataArray[i]
+    const dataX = xScale.getPixelForValue(dataPoint.x)
+    const distance = Math.abs(x - dataX)
+
+    // 找到最近的K线
+    if (distance < minDistance) {
+      minDistance = distance
+      closestIndex = i
+    }
+  }
+
+  // 當數據量較大時，擴大檢測範圍
+  const hitRange = Math.max(barWidth * 2, 5)
+
+  // 如果找到了足够近的K线，显示tooltip
+  if (closestIndex !== -1 && minDistance <= hitRange) {
+    if (globalCandleData && globalCandleData[closestIndex]) {
+      tooltip.data = globalCandleData[closestIndex]
+      tooltip.show = true
+      tooltip.x = event.clientX
+      tooltip.y = event.clientY
+      found = true
+    }
+  }
+
+  if (!found) {
+    tooltip.show = false
+  }
+}
+
+/**
+ * 处理图表标题，根据选择的周期显示对应的标题
+ */
+function getChartTitle() {
+  if (currentChartType.value === 'candlestick') {
+    // K线图标题逻辑保持不变
+    return stockSymbol.value
+  } else {
+    // 股价图标题根据选择的时间范围显示
+    let rangeText = ''
+    switch (priceChartRange.value) {
+      case '5min':
+        rangeText = '(5 Min)'
+        break
+      case '1month':
+        rangeText = '(1 Month)'
+        break
+      case '1year':
+        rangeText = '(1 Year)'
+        break
+      case '5years':
+        rangeText = '(5 Years)'
+        break
+      default:
+        rangeText = '(5 Min)'
+    }
+    return `${stockSymbol.value} ${rangeText}`
+  }
+}
+
+/** 獲取數據並渲染圖表 */
+async function fetchDataAndRenderChart(chartType = 'line') {
+  try {
+    // 取消之前的定时器，避免并发请求
+    if (updateInterval.value) {
+      clearInterval(updateInterval.value)
+      updateInterval.value = null
+    }
+
+    // 顯示加載狀態
+    const chartCanvas = document.getElementById('myChart') as HTMLCanvasElement
+    if (chartCanvas && chartCanvas.getContext) {
+      const ctx = chartCanvas.getContext('2d')
+      if (ctx) {
+        ctx.clearRect(0, 0, chartCanvas.width, chartCanvas.height)
+        ctx.font = '16px Arial'
+        ctx.fillStyle = 'white'
+        ctx.textAlign = 'center'
+        ctx.fillText('加載中...', chartCanvas.width / 2, chartCanvas.height / 2)
+      }
+    }
+
+    let apiUrl = ''
+
+    // 决定API URL基于时间范围
+    if (priceChartRange.value === '5min') {
+      // 5分钟数据 - 使用StockChartDtoredisdata API
+      apiUrl = `/api/StockChartDtoredisdata?symbols=${stockSymbol.value}&range=${priceChartRange.value}`
+    } else if (
+      validRange.value === '1d' &&
+      candlePeriod.value === 1 &&
+      candlePeriodType.value === 'month'
+    ) {
+      // 1个月日K数据
+      apiUrl = `/api/databy?symbol=${stockSymbol.value}&validRange=1d&periodType=month&period=1`
+    } else if (
+      validRange.value === '1wk' &&
+      candlePeriod.value === 1 &&
+      candlePeriodType.value === 'year'
+    ) {
+      // 1年周K数据
+      apiUrl = `/api/databy?symbol=${stockSymbol.value}&validRange=1wk&periodType=year&period=1`
+    } else if (
+      validRange.value === '1mo' &&
+      candlePeriod.value === 5 &&
+      candlePeriodType.value === 'year'
+    ) {
+      // 5年月K数据
+      apiUrl = `/api/databy?symbol=${stockSymbol.value}&validRange=1mo&periodType=year&period=5`
+    } else {
+      // 其他时间范围
+      apiUrl = `/api/databy?symbol=${stockSymbol.value}&validRange=${validRange.value}&period=${candlePeriod.value}&periodType=${candlePeriodType.value}`
+    }
+
+    console.log('API调用:', apiUrl)
+
+    const response = await fetch(apiUrl)
+
+    if (!response.ok) {
+      throw new Error(`API请求失败: ${response.status} ${response.statusText}`)
+    }
+
+    let apiData = await response.json()
+
+    if (!Array.isArray(apiData) || apiData.length === 0) {
+      throw new Error('API返回数据无效或为空')
+    }
+
+    // 验证并预处理数据
+    apiData = apiData.map((item: Record<string, unknown>) => {
+      // 检查并确保tradeDate存在且格式正确
+      if (item.tradeDate && typeof item.tradeDate === 'string') {
+        // 如果日期格式需要转换，这里可以处理
+        try {
+          const date = new Date(item.tradeDate)
+          if (isNaN(date.getTime())) {
+            console.warn('无效的tradeDate值:', item.tradeDate)
+            return { ...item, tradeDate: null }
+          }
+        } catch (_) {
+          console.warn('无法解析tradeDate:', item.tradeDate)
+          return { ...item, tradeDate: null }
+        }
+      }
+
+      // 确保数值字段为数字类型
+      const numericFields = ['open', 'high', 'low', 'close', 'volume']
+      numericFields.forEach((field) => {
+        if (item[field] !== undefined && item[field] !== null) {
+          const value = Number(item[field])
+          if (!isNaN(value)) {
+            item[field] = value
+          }
+        }
+      })
+
+      return item
+    })
+
+    // 过滤掉无效的数据项
+    const validApiData = apiData.filter(
+      (item: Record<string, unknown>) =>
+        (item.open !== undefined &&
+          item.high !== undefined &&
+          item.low !== undefined &&
+          item.close !== undefined) ||
+        item.regularMarketPrice !== undefined,
+    )
+
+    if (validApiData.length === 0) {
+      throw new Error('API返回了无效的数据结构，缺少必要字段')
+    }
+
+    // 保存到全局变量，用于鼠标悬停显示数据
+    globalLineData = [...validApiData]
+
+    // 统一使用renderChart函数处理所有渲染
+    renderChart(validApiData, chartType === 'line' ? 'line' : 'candlestick')
+  } catch (error: unknown) {
+    console.error('Error fetching data:', error)
+    // 显示错误信息
+    const chartCanvas = document.getElementById('myChart') as HTMLCanvasElement
+    if (chartCanvas && chartCanvas.getContext) {
+      const ctx = chartCanvas.getContext('2d')
+      if (ctx) {
+        ctx.clearRect(0, 0, chartCanvas.width, chartCanvas.height)
+        ctx.font = '16px Arial'
+        ctx.fillStyle = 'red'
+        ctx.textAlign = 'center'
+        ctx.fillText(
+          `數據加載失敗: ${error instanceof Error ? error.message : String(error)}`,
+          chartCanvas.width / 2,
+          chartCanvas.height / 2,
+        )
+      }
+    }
+  }
+}
+
+// 格式化日期
+function formatDate(dateValue: unknown, showDayFlag = true): string {
+  if (!dateValue) return ''
+
+  try {
+    const dateStr = String(dateValue)
+    const date = new Date(dateStr)
+
+    if (!isNaN(date.getTime())) {
+      // 检查是否是5年时间范围
+      if (!showDayFlag || priceChartRange.value === '5years') {
+        // 只显示年/月
+        const year = date.getFullYear()
+        const month = (date.getMonth() + 1).toString().padStart(2, '0')
+        return `${year}/${month}`
+      }
+
+      // 对于其他情况，显示完整日期
+      const year = date.getFullYear()
+      const month = (date.getMonth() + 1).toString().padStart(2, '0')
+      const day = date.getDate().toString().padStart(2, '0')
+      return `${year}/${month}/${day}`
+    }
+
+    return String(dateValue)
+  } catch (error) {
+    console.error('日期格式化错误:', error)
+    return String(dateValue)
+  }
+}
+
+// 下拉菜单显示切换函数
+function toggleChartTypeDropdown() {
+  showChartTypeDropdown.value = !showChartTypeDropdown.value
+  showPeriodDropdown.value = false
+  showRangeDropdown.value = false
+}
+
+function togglePeriodDropdown() {
+  showPeriodDropdown.value = !showPeriodDropdown.value
+  showChartTypeDropdown.value = false
+  showRangeDropdown.value = false
+}
+
+function toggleRangeDropdown() {
+  showRangeDropdown.value = !showRangeDropdown.value
+  showChartTypeDropdown.value = false
+  showPeriodDropdown.value = false
+}
+
+// 点击文档其他地方时关闭下拉菜单
+function closeAllDropdowns(event: MouseEvent) {
+  const target = event.target as HTMLElement
+  if (!target.closest('.custom-dropdown')) {
+    showChartTypeDropdown.value = false
+    showPeriodDropdown.value = false
+    showRangeDropdown.value = false
+  }
+}
+
+onMounted(() => {
+  fetchDataAndRenderChart()
+  startAutoRefresh()
+  document.title = stockSymbol.value
+  document.addEventListener('click', closeAllDropdowns)
+
+  // 监听时间范围和显示选项变化
+  watchEffect(() => {
+    // 追踪相关变量
+    const _ = [
+      showCandlestick.value,
+      show5MA.value,
+      show10MA.value,
+      show20MA.value,
+      priceChartRange.value,
+    ]
+
+    // 根据时间范围设置默认显示选项
+    if (priceChartRange.value === '5min') {
+      // 5min选项：显示价格线和MA线，不显示K线图
+      showPriceLine.value = true
+      showCandlestick.value = false
+    } else {
+      // 其他选项：显示K线图和MA线，不显示价格线
+      showPriceLine.value = false
+      if (!_[0]) {
+        // 如果用户之前关掉了K线图，自动打开
+        showCandlestick.value = true
+      }
+    }
+
+    // 如果启用5分钟数据且未启用自动刷新，启动自动刷新
+    if (priceChartRange.value === '5min' && !updateInterval.value) {
+      startAutoRefresh()
+    } else if (priceChartRange.value !== '5min' && updateInterval.value) {
+      // 非5min选项下关闭自动刷新
+      clearInterval(updateInterval.value)
+      updateInterval.value = null
+    }
+
+    // 当图表选项变化时，重新渲染图表
+    fetchDataAndRenderChart()
+  })
+})
+
+onUnmounted(() => {
+  if (updateInterval.value) clearInterval(updateInterval.value)
+
+  const chartCanvas = document.getElementById('myChart') as HTMLCanvasElement
+  if (chartCanvas) {
+    chartCanvas.onmousemove = null
+    chartCanvas.onmouseout = null
+  }
+
+  if (chartInstance.value) chartInstance.value.destroy()
+  document.removeEventListener('click', closeAllDropdowns)
+})
+
+// 获取K线周期文本
+function getPeriodText() {
+  if (validRange.value === '1d' && candlePeriod.value === 1 && candlePeriodType.value === 'month') {
+    return '1 Month (Daily)'
+  } else if (
+    validRange.value === '1wk' &&
+    candlePeriod.value === 1 &&
+    candlePeriodType.value === 'year'
+  ) {
+    return '1 Year (Weekly)'
+  } else if (
+    validRange.value === '1mo' &&
+    candlePeriod.value === 5 &&
+    candlePeriodType.value === 'year'
+  ) {
+    return '5 Years (Monthly)'
+  }
+  return '1 Month (Daily)'
+}
+
+// 获取股价图表时间范围文本
+function getPriceRangeText() {
+  // 检查当前的validRange和candlePeriod配置
+  if (validRange.value === '1d' && candlePeriod.value === 1 && candlePeriodType.value === 'month') {
+    return '1 Month (Daily)'
+  } else if (
+    validRange.value === '1wk' &&
+    candlePeriod.value === 1 &&
+    candlePeriodType.value === 'year'
+  ) {
+    return '1 Year (Weekly)'
+  } else if (
+    validRange.value === '1mo' &&
+    candlePeriod.value === 5 &&
+    candlePeriodType.value === 'year'
+  ) {
+    return '5 Years (Monthly)'
+  } else if (priceChartRange.value === '5min') {
+    return '5 Min.'
+  }
+
+  // 默认根据priceChartRange返回
+  switch (priceChartRange.value) {
+    case '5min':
+      return '5 Min.'
+    case '1month':
+      return '1 Month (Daily)'
+    case '1year':
+      return '1 Year (Weekly)'
+    case '5years':
+      return '5 Years (Monthly)'
+    default:
+      return '5 Min.'
+  }
+}
+
+// 选择图表类型
+function selectChartType(type: string) {
+  currentChartType.value = type
+  showChartTypeDropdown.value = false
+
+  // 清除之前的渲染定时器，避免多次渲染
+  if (updateInterval.value) {
+    clearInterval(updateInterval.value)
+    updateInterval.value = null
+  }
+
+  fetchDataAndRenderChart(currentChartType.value)
+
+  // 仅当非K线图时启动自动刷新
+  if (currentChartType.value !== 'candlestick') {
+    startAutoRefresh()
+  }
+}
+
+// 选择K线周期
+function selectPeriod(period: string) {
+  showPeriodDropdown.value = false
+
+  // 根据选择的选项设置相应的参数
+  switch (period) {
+    case '1month':
+      // 1个月，日K线
+      validRange.value = '1d'
+      candlePeriod.value = 1
+      candlePeriodType.value = 'month'
+      break
+    case '1year':
+      // 1年，周K线
+      validRange.value = '1wk'
+      candlePeriod.value = 1
+      candlePeriodType.value = 'year'
+      break
+    case '5years':
+      // 5年，月K线
+      validRange.value = '1mo'
+      candlePeriod.value = 5
+      candlePeriodType.value = 'year'
+      break
+    default:
+      // 默认1个月，日K线
+      validRange.value = '1d'
+      candlePeriod.value = 1
+      candlePeriodType.value = 'month'
+  }
+
+  // 立即更新图表
+  fetchDataAndRenderChart()
+}
+
+// 选择股价图表时间范围
+// 选择时间范围和周期
+function selectTimeRangeAndPeriod(range: string) {
+  priceChartRange.value = range
+  showRangeDropdown.value = false
+
+  // 根据选择的范围设置相应的周期
+  switch (range) {
+    case '1month':
+      validRange.value = '1d'
+      candlePeriod.value = 1
+      candlePeriodType.value = 'month'
+      // 设置1month时的默认显示选项
+      showPriceLine.value = false
+      showCandlestick.value = true
+      show5MA.value = true
+      show10MA.value = true
+      show20MA.value = true
+      break
+    case '1year':
+      validRange.value = '1wk'
+      candlePeriod.value = 1
+      candlePeriodType.value = 'year'
+      // 设置1year时的默认显示选项
+      showPriceLine.value = false
+      showCandlestick.value = true
+      show5MA.value = true
+      show10MA.value = true
+      show20MA.value = true
+      break
+    case '5years':
+      validRange.value = '1mo'
+      candlePeriod.value = 5
+      candlePeriodType.value = 'year'
+      // 设置5years时的默认显示选项
+      showPriceLine.value = false
+      showCandlestick.value = true
+      show5MA.value = true
+      show10MA.value = true
+      show20MA.value = true
+      break
+    case '5min':
+      // 确保使用5min数据
+      priceChartRange.value = '5min'
+      // 设置5min时的默认显示选项
+      showPriceLine.value = true
+      showCandlestick.value = false
+      show5MA.value = true
+      show10MA.value = true
+      show20MA.value = true
+      break
+    default:
+      // 默认1个月，日K线
+      validRange.value = '1d'
+      candlePeriod.value = 1
+      candlePeriodType.value = 'month'
+  }
+
+  // 立即更新图表
+  fetchDataAndRenderChart()
+}
+
+// 单独处理选择5min的情况
+function selectPriceRange(range: string) {
+  if (range === '5min') {
+    // 确保使用5min数据
+    priceChartRange.value = '5min'
+    showRangeDropdown.value = false
+
+    // 设置5min时的默认显示选项
+    showPriceLine.value = true
+    showCandlestick.value = false
+    show5MA.value = true
+    show10MA.value = true
+    show20MA.value = true
+
+    // 清除之前的渲染定时器，避免多次渲染
+    if (updateInterval.value) {
+      clearInterval(updateInterval.value)
+      updateInterval.value = null
+    }
+
+    // 重新获取数据并渲染图表
+    fetchDataAndRenderChart()
+
+    // 启动自动刷新
+    startAutoRefresh()
+  } else {
+    // 对于其他选项使用正常的选择函数
+    selectTimeRangeAndPeriod(range)
+  }
+}
+
+// 日期格式化辅助函数
+function formatDateCustom(date: Date, format: string): string {
+  if (format === 'yyyy-MM') {
+    return `${date.getFullYear()}-${(date.getMonth() + 1).toString().padStart(2, '0')}`
+  } else if (format === 'MM-dd') {
+    return `${(date.getMonth() + 1).toString().padStart(2, '0')}-${date.getDate().toString().padStart(2, '0')}`
+  } else if (format === 'HH:mm') {
+    return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`
+  }
+  return date.toISOString().split('T')[0] // 默认返回yyyy-MM-dd
+}
+
+// K线图插件
+const candlestickPlugin = {
+  id: 'candlestick',
+  beforeDraw: (chart: any) => {
+    // K线图专用绘制逻辑
+  },
+}
+
+// 计算移动平均线
+function calculateMA(days: number, values: number[]): number[] {
+  const result = []
+  for (let i = 0; i < values.length; i++) {
+    if (i < days - 1) {
+      // 在达到所需天数前，返回null表示没有数据
+      result.push(NaN)
+    } else {
+      // 计算平均值
+      let sum = 0
+      for (let j = 0; j < days; j++) {
+        sum += values[i - j]
+      }
+      result.push(sum / days)
+    }
+  }
+  return result
+}
+
+// 渲染相关的响应式变量
+const chartRendered = ref(false)
+const lastRenderTime = ref(0)
+</script>
+
+<template>
+  <div class="stock-chart-container">
+    <div class="tabs-navigation">
+      <div
+        v-for="stock in stockList"
+        :key="stock.code"
+        class="tab-item"
+        :class="{ active: stockSymbol === stock.code }"
+        @click="switchStock(stock.code)"
+      >
+        <span>{{ stock.code }}</span>
+      </div>
+    </div>
+
+    <div class="main-title">
+      <h1>{{ getChartTitle() }}</h1>
+      <!-- 在K线图模式下，隐藏单独的周期信息，因为已经合并到图表标题中 -->
+      <div
+        v-if="currentChartType === 'candlestick'"
+        class="chart-period-info"
+        style="display: none"
+      >
+        {{
+          candlePeriodType === 'day'
+            ? '日K'
+            : candlePeriodType === 'week'
+              ? '周K'
+              : candlePeriodType === 'month'
+                ? candlePeriod === 1
+                  ? '月K'
+                  : candlePeriod === 3
+                    ? '季K'
+                    : candlePeriod === 6
+                      ? '半年K'
+                      : `${candlePeriod}月K`
+                : candlePeriodType === 'year'
+                  ? '年K'
+                  : ''
+        }}
+        ({{ candlePeriod
+        }}{{
+          candlePeriodType === 'day'
+            ? '天'
+            : candlePeriodType === 'week'
+              ? '周'
+              : candlePeriodType === 'month'
+                ? '月'
+                : candlePeriodType === 'year'
+                  ? '年'
+                  : ''
+        }})
+      </div>
+    </div>
+
+    <div class="controls-container">
+      <div class="search-container">
+        <input
+          type="text"
+          v-model="searchInput"
+          placeholder="Enter stock code (e.g., 0388.HK)"
+          @keyup="handleKeyPress"
+        />
+        <button @click="searchStock">Search</button>
+      </div>
+
+      <!-- 添加图表显示选项：价格线、K线、均线等 -->
+      <div class="chart-display-options">
+        <!-- 只在5min选项下显示价格线选项 -->
+        <label class="chart-option" v-if="priceChartRange === '5min'">
+          <input type="checkbox" v-model="showPriceLine" disabled /> Stock Price Chart
+        </label>
+        <!-- 只在非5min选项下显示K线图选项 -->
+        <label class="chart-option" v-if="priceChartRange !== '5min'">
+          <input type="checkbox" v-model="showCandlestick" /> Candlestick
+        </label>
+        <label class="chart-option"> <input type="checkbox" v-model="show5MA" /> 5MA </label>
+        <label class="chart-option"> <input type="checkbox" v-model="show10MA" /> 10MA </label>
+        <label class="chart-option"> <input type="checkbox" v-model="show20MA" /> 20MA </label>
+      </div>
+
+      <!-- 修改股价图表时间范围选择下拉菜单 -->
+      <div class="custom-dropdown">
+        <div class="custom-dropdown-trigger period-select-trigger" @click="toggleRangeDropdown">
+          {{ getPriceRangeText() }}
+        </div>
+        <div class="custom-dropdown-list" v-if="showRangeDropdown">
+          <div
+            class="custom-dropdown-item period-select-item"
+            :class="{ selected: priceChartRange === '5min' }"
+            @click="selectPriceRange('5min')"
+          >
+            5 Min.
+          </div>
+          <div
+            class="custom-dropdown-item period-select-item"
+            :class="{
+              selected:
+                priceChartRange === '1d' && candlePeriod === 1 && candlePeriodType === 'month',
+            }"
+            @click="selectTimeRangeAndPeriod('1month')"
+          >
+            1 Month (Daily)
+          </div>
+          <div
+            class="custom-dropdown-item period-select-item"
+            :class="{
+              selected:
+                priceChartRange === '1wk' && candlePeriod === 1 && candlePeriodType === 'year',
+            }"
+            @click="selectTimeRangeAndPeriod('1year')"
+          >
+            1 Year (Weekly)
+          </div>
+          <div
+            class="custom-dropdown-item period-select-item"
+            :class="{
+              selected:
+                priceChartRange === '1mo' && candlePeriod === 5 && candlePeriodType === 'year',
+            }"
+            @click="selectTimeRangeAndPeriod('5years')"
+          >
+            5 Years (Monthly)
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="chartContainer">
+      <canvas id="myChart"></canvas>
+
+      <!-- 自定义tooltip -->
+      <div
+        v-if="tooltip.show && tooltip.data"
+        class="custom-tooltip"
+        :style="{ left: tooltip.x + 'px', top: tooltip.y + 10 + 'px' }"
+      >
+        <!-- K线图数据显示 -->
+        <template v-if="tooltip.data.tradeDate">
+          <div>日期: {{ formatDate(tooltip.data.tradeDate) }}</div>
+          <div>開盤: {{ Number(tooltip.data.open).toFixed(2) }}</div>
+          <div>收盤: {{ Number(tooltip.data.close).toFixed(2) }}</div>
+          <div>最高: {{ Number(tooltip.data.high).toFixed(2) }}</div>
+          <div>最低: {{ Number(tooltip.data.low).toFixed(2) }}</div>
+          <div>成交量: {{ Number(tooltip.data.volume).toLocaleString() }}</div>
+        </template>
+
+        <!-- 价格线图数据显示 -->
+        <template v-else-if="tooltip.data.type === 'price'">
+          <div>時間: {{ tooltip.data.time }}</div>
+          <div>價格: {{ Number(tooltip.data.price).toFixed(2) }}</div>
+        </template>
+
+        <!-- MA线图数据显示 -->
+        <template v-else-if="tooltip.data.type === 'sma'">
+          <div>時間: {{ tooltip.data.time }}</div>
+          <div>{{ tooltip.data.label || '5MA' }}: {{ Number(tooltip.data.price).toFixed(2) }}</div>
+        </template>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.stock-chart-container {
+  background-color: #000;
+  color: white;
+  font-family: Arial, sans-serif;
+  text-align: center;
+  height: 100vh;
+  width: 100vw; /* 使用視窗寬度 */
+  padding: 0;
+  margin: 0 auto; /* 居中整個容器 */
+  display: flex;
+  flex-direction: column;
+  align-items: center; /* 保持內容水平居中 */
+  justify-content: flex-start; /* 從頂部開始排列 */
+  overflow: hidden;
+  position: relative;
+  box-sizing: border-box; /* 確保padding不會增加寬度 */
+  left: 0; /* 確保不會偏移 */
+  right: 0; /* 確保不會偏移 */
+}
+
+.tabs-navigation {
+  display: flex;
+  background-color: #111;
+  border-bottom: 1px solid #333;
+  height: 20px; /* 增加高度與標題一致 */
+  width: 100%;
+  justify-content: center; /* 居中選項卡 */
+  flex-wrap: wrap; /* 允许换行 */
+  overflow-x: auto; /* 如果内容超出，可以水平滚动 */
+}
+
+.tab-item {
+  padding: 0 10px; /* 减少内边距以适应更多选项 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-right: 1px solid #333;
+  cursor: pointer;
+  font-size: 14px; /* 稍微减小字体大小 */
+  transition: background-color 0.2s;
+  min-width: 70px; /* 设置最小宽度 */
+  box-sizing: border-box;
+}
+
+.tab-item:hover {
+  background-color: #222;
+}
+
+.tab-item.active {
+  background-color: #333;
+}
+
+.main-title {
+  padding: 2px 0 1px; /* 增加內邊距 */
+  text-align: center;
+  width: 100%;
+  max-width: 1200px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 15px; /* 增加字體大小 */
+  font-weight: bold;
+}
+
+.chart-period-info {
+  font-size: 14px;
+  color: #aaa;
+  margin-top: 5px;
+}
+
+.controls-container {
+  padding: 1px 0 2px; /* 增加內邊距 */
+  display: flex;
+  justify-content: center;
+  gap: 3px; /* 增加間距 */
+  flex-wrap: wrap;
+  width: 100%;
+  max-width: 1200px;
+}
+
+.search-container {
+  display: flex;
+}
+
+input {
+  padding: 4px 6px;
+  font-size: 12px;
+  background-color: #333;
+  color: white;
+  border: 1px solid #555;
+  border-radius: 3px 0 0 3px;
+  width: 140px;
+}
+
+input:focus {
+  outline: none;
+  border-color: #80f0e8;
+}
+
+button {
+  padding: 4px 8px;
+  font-size: 12px;
+  background-color: #444;
+  color: white;
+  border: 1px solid #555;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.search-container button {
+  border-radius: 0 3px 3px 0;
+  border-left: none;
+}
+
+button:hover {
+  background-color: #555;
+}
+
+select {
+  padding: 4px 6px;
+  font-size: 12px;
+  background-color: #2a2a2a;
+  color: white;
+  border: 1px solid #444;
+  border-radius: 3px;
+  cursor: pointer;
+  margin-right: 5px;
+  max-width: 150px;
+  position: relative;
+}
+
+select:hover {
+  background-color: #444;
+}
+
+/* 为K线周期选择器添加特殊样式 */
+.period-select {
+  background-color: #3a3a3a;
+  border: 1px solid #555;
+  font-weight: bold;
+  color: #ffcc00;
+}
+
+.period-select option {
+  background-color: #2a2a2a;
+  color: white;
+}
+
+.period-select option:checked {
+  background-color: #444;
+  color: #ffcc00;
+  font-weight: bold;
+}
+
+/* 强制下拉菜单始终向下展开 */
+select:not([multiple]) {
+  transform-origin: top center;
+}
+
+/* 可能需要添加这个样式来修复某些浏览器的行为 */
+select option {
+  position: relative;
+  top: 0;
+  bottom: auto;
+}
+
+#chartContainer {
+  flex: 1;
+  width: 100%;
+  max-width: 100%; /* 使用100%而不是100vw */
+  margin: 0 auto; /* 水平居中 */
+  padding: 0;
+  background-color: black;
+  display: flex;
+  align-items: center;
+  justify-content: center; /* 水平居中 */
+  height: 70vh;
+  position: relative;
+  box-sizing: border-box;
+  left: 0; /* 確保容器沒有偏移 */
+  right: 0;
+}
+
+canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  margin: 0 auto; /* 確保畫布居中 */
+  max-width: 1200px; /* 限制最大寬度 */
+}
+
+.auto-refresh-toggle {
+  position: absolute;
+  bottom: 10px;
+  right: 10px;
+  z-index: 10;
+}
+
+.auto-refresh-toggle button {
+  padding: 4px 8px;
+  font-size: 11px;
+  border-radius: 3px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+  transition: all 0.2s ease;
+}
+
+.refresh-on {
+  background-color: #2c7be5;
+  border-color: #2c7be5;
+}
+
+.refresh-off {
+  background-color: #6c757d;
+  border-color: #6c757d;
+}
+
+.auto-refresh-toggle button:hover {
+  transform: translateY(-1px);
+}
+
+.custom-tooltip {
+  position: absolute;
+  background-color: rgba(0, 0, 0, 0.8);
+  color: white;
+  border-radius: 4px;
+  padding: 4px; /* 減小內邊距 */
+  font-size: 6px; /* 縮小字體至一半大小，原本12px */
+  z-index: 1000;
+  pointer-events: none;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.5);
+  transform: translateX(-50%); /* 使tooltip水平居中於滑鼠位置 */
+}
+
+/* 移除原来的select样式 */
+.custom-dropdown {
+  position: relative;
+  display: inline-block;
+  margin-right: 5px;
+  max-width: 150px;
+  z-index: 100; /* 确保下拉菜单显示在前面 */
+}
+
+.custom-dropdown-trigger {
+  padding: 4px 6px;
+  font-size: 11px; /* 减小字体大小 */
+  background-color: #2a2a2a;
+  color: white;
+  border: 1px solid #444;
+  border-radius: 3px;
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.custom-dropdown-trigger.period-select-trigger {
+  background-color: #3a3a3a;
+  border: 1px solid #555;
+  font-weight: bold;
+  color: #ffcc00;
+  font-size: 11px; /* 保持字体大小统一 */
+}
+
+.custom-dropdown-trigger:hover {
+  background-color: #444;
+}
+
+.custom-dropdown-trigger:after {
+  content: '▼';
+  font-size: 8px;
+  margin-left: 5px;
+}
+
+.custom-dropdown-list {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  width: 100%;
+  background-color: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 3px;
+  margin-top: 2px;
+  max-height: 200px;
+  overflow-y: auto;
+  z-index: 200; /* 确保下拉菜单在其他元素之上 */
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+}
+
+.custom-dropdown-item {
+  padding: 6px 8px;
+  cursor: pointer;
+  color: white;
+  font-size: 11px; /* 保持字体大小统一 */
+}
+
+.custom-dropdown-item.period-select-item {
+  background-color: #2a2a2a;
+  color: white;
+}
+
+.custom-dropdown-item.selected {
+  background-color: #444;
+  font-weight: bold;
+}
+
+.custom-dropdown-item.period-select-item.selected {
+  color: #ffcc00;
+}
+
+.custom-dropdown-item:hover {
+  background-color: #444;
+}
+
+/* 添加响应式适配 */
+@media (max-width: 768px) {
+  #chartContainer {
+    width: 100%;
+    padding: 0 5px; /* 在較小屏幕上減少內邊距 */
+    height: 60vh;
+    max-width: 100%; /* 確保不超過容器大小 */
+  }
+
+  .controls-container {
+    padding: 2px 5px; /* 減少控制區域的內邊距 */
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .main-title {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .tabs-navigation {
+    width: 100%;
+  }
+}
+
+/* 小屏幕設備調整 */
+@media (max-width: 576px) {
+  #chartContainer {
+    padding: 0 2px; /* 最小屏幕上最小內邊距 */
+  }
+
+  .custom-dropdown {
+    max-width: 100px; /* 減小下拉框最大寬度 */
+  }
+
+  .search-container input {
+    width: 100px; /* 減小搜索框寬度 */
+  }
+}
+
+/* 強制全頁面居中 */
+#app,
+body,
+html {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  overflow-x: hidden; /* 防止水平滾動 */
+}
+
+.tabs-navigation,
+.main-title,
+.controls-container {
+  width: 100%;
+  max-width: 1200px; /* 限制最大寬度與canvas一致 */
+  margin: 0 auto; /* 確保水平居中 */
+  left: 0;
+  right: 0;
+}
+
+.chart-display-options {
+  display: flex;
+  gap: 10px;
+  margin: 0 5px;
+}
+
+.chart-option {
+  display: flex;
+  align-items: center;
+  font-size: 14px;
+  color: white;
+  cursor: pointer;
+}
+
+.chart-option input {
+  margin-right: 4px;
+  width: auto;
+  cursor: pointer;
+}
+</style>
