@@ -1,0 +1,33 @@
+server:
+  port: 8090
+
+spring.datasource:
+  driverClassName: "org.postgresql.Driver"
+  url: "jdbc:postgresql://localhost:5432/stockdb"
+  username: "postgres"
+  password: "admin1234"  # 请替换为您的实际PostgreSQL密码
+  
+spring.jpa:
+  show-sql: true
+  hibernate.ddl-auto: update
+  properties:
+    hibernate:
+      dialect: org.hibernate.dialect.PostgreSQLDialect
+
+spring:
+  data:
+    redis:
+      host: localhost
+      port: 6379
+  jackson:
+    serialization:
+      WRITE_DATES_AS_TIMESTAMPS: false
+
+
+api:
+  yahooFinance:
+    domain: "https://query1.finance.yahoo.com"
+    endpoints:
+      ky: "/v1/test/getcrumb"
+      data: "/v7/finance/quote?symbols="
+      crumb: "&crumb="
