@@ -11,7 +11,7 @@
 	</parent>
 	<groupId>com.example.project</groupId>
 	<artifactId>demo-bc-xfin-service</artifactId>
-	<version>0.1.0-SNAPSHOT</version>
+	<version>0.1.1-SNAPSHOT</version>
 	<name>demo-bc-xfin-service</name>
 	<description>Demo project for Spring Boot</description>
 	<url />

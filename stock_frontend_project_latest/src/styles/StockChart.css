@@ -1,0 +1,13 @@
+/* ... 现有代码 ... */
+
+/* 增加K线宽度的CSS */
+.candlestick-element {
+  width: 8px !important;  /* 增加宽度 */
+}
+
+/* 调整成交量高度的CSS */
+.volume-container {
+  max-height: 30% !important;  /* 限制成交量区域高度 */
+}
+
+/* ... 现有代码 ... */

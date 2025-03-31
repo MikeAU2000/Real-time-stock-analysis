@@ -36,7 +36,7 @@ public class StockSchedulaerImpl {
   @Autowired
   private DbUpload dbUpload;
 
-  @Scheduled(cron = "0 0 17 * * MON-FRI")
+  @Scheduled(cron = "0 59 23 * * MON-FRI")
   public void runDailyTask() throws JsonProcessingException {
     List<String> stockSymbols = new ArrayList<>();
     String[] redisData = this.redisManager.get("stock", String[].class);
@@ -60,7 +60,7 @@ public class StockSchedulaerImpl {
     System.out.println(LocalDateTime.now());
   }
 
-  @Scheduled(cron = "0 0 23 * * FRI")
+  @Scheduled(cron = "0 59 23 * * SUN")
   public void runWeeklyTask() throws JsonProcessingException {
     List<String> stockSymbols = new ArrayList<>();
     String[] redisData = this.redisManager.get("stock", String[].class);
