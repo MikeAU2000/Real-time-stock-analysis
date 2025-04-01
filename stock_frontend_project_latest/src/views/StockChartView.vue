@@ -186,64 +186,47 @@ function renderChart(data: Array<Record<string, any>>) {
   const chartCanvas = document.getElementById('stockChart') as HTMLCanvasElement
   if (!chartCanvas) return
 
-  // 记录当前图表的状态，用于无缝更新
+  // 清除舊圖表（保留 zoom 狀態）
   let oldZoom = null
   let oldCenter = null
 
   if (chartInstance.value) {
-    // 保存当前缩放和位置状态
     const scales = chartInstance.value.scales
     if (scales.x && scales.y) {
       oldZoom = {
-        x: {
-          min: scales.x.min,
-          max: scales.x.max,
-        },
-        y: {
-          min: scales.y.min,
-          max: scales.y.max,
-        },
+        x: { min: scales.x.min, max: scales.x.max },
+        y: { min: scales.y.min, max: scales.y.max },
       }
       oldCenter = {
         x: (scales.x.min + scales.x.max) / 2,
         y: (scales.y.min + scales.y.max) / 2,
       }
     }
-
-    // 销毁旧图表
     chartInstance.value.destroy()
     chartInstance.value = null
   }
 
-  // 准备数据
+  // 先根據 apiDateTime 排序
+  const sortedData = [...data].sort((a, b) => {
+    return new Date(a.apiDateTime).getTime() - new Date(b.apiDateTime).getTime()
+  })
+
   const labels: string[] = []
   const priceData: number[] = []
-  const ma5Data: (number | null)[] = [] // 改为接受null值
-  const ma10Data: (number | null)[] = [] // 改为接受null值
-  const ma20Data: (number | null)[] = [] // 改为接受null值
+  const ma5Data: (number | null)[] = []
+  const ma10Data: (number | null)[] = []
+  const ma20Data: (number | null)[] = []
 
-  data.forEach((item, index) => {
-    // 处理时间标签 - 根据API返回的marketUnixTime字段
-    let dateTime: Date
-    if (item.marketUnixtime) {
-      // 旧的模拟数据格式
-      dateTime = new Date(Number(item.marketUnixtime) * 1000)
-    } else if (item.marketUnixTime) {
-      // API返回的格式，确保转换为字符串或数字
-      const timeValue = item.marketUnixTime as string
-      dateTime = new Date(timeValue)
-    } else {
-      dateTime = new Date()
-    }
+  sortedData.forEach((item, index) => {
+    const dateTime = new Date(item.apiDateTime)
 
+    // 顯示時間標籤：含秒數避免重複（也可以選用 toLocaleTimeString）
     labels.push(
-      `${dateTime.getHours().toString().padStart(2, '0')}:${dateTime.getMinutes().toString().padStart(2, '0')}`,
+      `${dateTime.getHours().toString().padStart(2, '0')}:${dateTime.getMinutes().toString().padStart(2, '0')}:${dateTime.getSeconds().toString().padStart(2, '0')}`
     )
 
-    // 处理价格和均线数据
     priceData.push(Number(item.regularMarketPrice))
 
-    // 如果API直接提供了MA数据，根据索引位置决定是否显示
     if (item.smaFivePrice !== undefined) {
       ma5Data.push(index >= 5 ? Number(item.smaFivePrice) : null)
     }
@@ -257,23 +240,19 @@ function renderChart(data: Array<Record<string, any>>) {
     }
   })
 
-  // 如果API没有提供MA数据，计算MA数据
   const calcMa5 = ma5Data.length === 0 ? calculateMA(5, priceData) : ma5Data
   const calcMa10 = ma10Data.length === 0 ? calculateMA(10, priceData) : ma10Data
   const calcMa20 = ma20Data.length === 0 ? calculateMA(20, priceData) : ma20Data
 
-  // 计算价格范围
   const maxPrice = Math.max(...priceData.filter((p) => !isNaN(p)))
   const minPrice = Math.min(...priceData.filter((p) => !isNaN(p)))
   const priceRange = maxPrice - minPrice
-  const pricePadding = priceRange * 0.1 // 添加10%的边距
+  const pricePadding = priceRange * 0.1
   const yAxisMin = Math.max(0, minPrice - pricePadding)
   const yAxisMax = maxPrice + pricePadding
 
-  // 准备数据集
   const datasets = []
 
-  // 价格线
   if (showPriceLine.value) {
     datasets.push({
       label: '价格',
@@ -289,7 +268,6 @@ function renderChart(data: Array<Record<string, any>>) {
     })
   }
 
-  // 5MA均线
   if (show5MA.value) {
     datasets.push({
       label: '5MA',
@@ -304,7 +282,6 @@ function renderChart(data: Array<Record<string, any>>) {
     })
   }
 
-  // 10MA均线
   if (show10MA.value) {
     datasets.push({
       label: '10MA',
@@ -319,7 +296,6 @@ function renderChart(data: Array<Record<string, any>>) {
     })
   }
 
-  // 20MA均线
   if (show20MA.value) {
     datasets.push({
       label: '20MA',
@@ -334,7 +310,6 @@ function renderChart(data: Array<Record<string, any>>) {
     })
   }
 
-  // 创建图表
   const ctx = chartCanvas.getContext('2d')
   if (!ctx) return
 
@@ -347,18 +322,16 @@ function renderChart(data: Array<Record<string, any>>) {
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      animation: false, // 禁用所有动画
+      animation: false,
       transitions: {
         active: {
           animation: {
-            duration: 0, // 确保无过渡动画
+            duration: 0,
           },
         },
       },
       plugins: {
-        legend: {
-          display: false, // 使用自定义图例
-        },
+        legend: { display: false },
         tooltip: {
           mode: 'index',
           intersect: false,
@@ -394,7 +367,6 @@ function renderChart(data: Array<Record<string, any>>) {
             color: '#aaaaaa',
             maxRotation: 0,
             callback: function (value, index) {
-              // 5分钟图表每个点都显示时间
               return labels[index]
             },
           },
@@ -404,8 +376,8 @@ function renderChart(data: Array<Record<string, any>>) {
           grid: {
             color: 'rgba(255, 255, 255, 0.1)',
           },
-          min: yAxisMin, // 设置Y轴最小值
-          max: yAxisMax, // 设置Y轴最大值
+          min: yAxisMin,
+          max: yAxisMax,
           ticks: {
             color: '#aaaaaa',
             callback: function (value) {
@@ -417,7 +389,7 @@ function renderChart(data: Array<Record<string, any>>) {
     },
   })
 
-  // 恢复之前的缩放和位置状态，实现无缝更新
+  // 回復之前 zoom 狀態
   if (oldZoom && chartInstance.value) {
     const scales = chartInstance.value.scales
     if (scales.x && scales.y) {
@@ -425,10 +397,11 @@ function renderChart(data: Array<Record<string, any>>) {
       scales.x.max = oldZoom.x.max
       scales.y.min = oldZoom.y.min
       scales.y.max = oldZoom.y.max
-      chartInstance.value.update('none') // 不使用动画更新
+      chartInstance.value.update('none')
     }
   }
 }
+
 
 // 渲染K线图表
 function renderCandleChart(data: Array<Record<string, any>>) {
